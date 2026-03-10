@@ -1,79 +1,81 @@
-/*
-    ------------------------------------------------------------------
+#include "TTLEventGenerator.h"
+#include "TTLEventGeneratorEditor.h"
 
-    This file is part of the Open Ephys GUI
-    Copyright (C) 2025 Open Ephys
+TTLEventGenerator::TTLEventGenerator() : GenericProcessor("TTL Event Generator") {}
+TTLEventGenerator::~TTLEventGenerator() {}
 
-    ------------------------------------------------------------------
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
-*/
-
-#include "VisualizerPlugin.h"
-
-#include "VisualizerPluginEditor.h"
-
-VisualizerPlugin::VisualizerPlugin()
-    : GenericProcessor ("Visualizer Plugin")
+void TTLEventGenerator::registerParameters()
 {
+    // 가이드: 파라미터 등록
+    addFloatParameter(Parameter::PROCESSOR_SCOPE, "interval", "Interval", "ms", 1000.0f, 0.0f, 5000.0f, 50.0f);
+    addTtlLineParameter(Parameter::STREAM_SCOPE, "output_line", "Output line", "Output line for generated TTL events");
+    addNotificationParameter(Parameter::PROCESSOR_SCOPE, "manual_trigger", "Trigger", "Triggers a TTL event", false);
 }
 
-VisualizerPlugin::~VisualizerPlugin()
+void TTLEventGenerator::parameterValueChanged(Parameter* param)
 {
+    if (param->getName().equalsIgnoreCase("manual_trigger")) {
+        shouldTriggerEvent = true;
+    } else if (param->getName().equalsIgnoreCase("interval")) {
+        eventIntervalMs = (float)param->getValue();
+    } else if (param->getName().equalsIgnoreCase("output_line")) {
+        outputLine = (int)param->getValue();
+    }
 }
 
-AudioProcessorEditor* VisualizerPlugin::createEditor()
+void TTLEventGenerator::updateSettings()
 {
-    editor = std::make_unique<VisualizerPluginEditor> (this);
-    return editor.get();
+    EventChannel::Settings settings{ EventChannel::Type::TTL, "TTL Event Generator Output", "Default TTL event channel", "ttl.events", dataStreams[0] };
+    ttlChannel = new EventChannel(settings);
+    eventChannels.add(ttlChannel);
+    ttlChannel->addProcessor(this);
 }
 
-void VisualizerPlugin::registerParameters()
+bool TTLEventGenerator::startAcquisition()
 {
-    // Register any parameters here if needed
-    // For example: addSelectedChannelsParameter (Parameter::STREAM_SCOPE,
-    //                                 channels,
-    //                                 Channels,
-    //                                 Selected channels to use);
+    counter = 0;
+    state = false;
+    return true;
 }
 
-void VisualizerPlugin::updateSettings()
+void TTLEventGenerator::process(AudioBuffer<float>& buffer)
 {
+    for (auto stream : getDataStreams())
+    {
+        if (stream == getDataStreams()[0])
+        {
+            int totalSamples = getNumSamplesInBlock(stream->getStreamId());
+            uint64 startSampleForBlock = getFirstSampleNumberForBlock(stream->getStreamId());
+            int eventIntervalInSamples = (int)(stream->getSampleRate() * eventIntervalMs / 2000.0);
+
+            if (shouldTriggerEvent) {
+                TTLEventPtr eventPtr = TTLEvent::createTTLEvent(ttlChannel, startSampleForBlock, outputLine, true);
+                addEvent(eventPtr, 0);
+                shouldTriggerEvent = false;
+                eventWasTriggered = true;
+                triggeredEventCounter = 0;
+            }
+
+            for (int i = 0; i < totalSamples; i++) {
+                counter++;
+                if (eventWasTriggered) triggeredEventCounter++;
+
+                if (triggeredEventCounter == eventIntervalInSamples) {
+                    TTLEventPtr eventPtr = TTLEvent::createTTLEvent(ttlChannel, startSampleForBlock + i, outputLine, false);
+                    addEvent(eventPtr, i);
+                    eventWasTriggered = false;
+                    triggeredEventCounter = 0;
+                }
+
+                if (counter == eventIntervalInSamples && eventIntervalMs > 0) {
+                    state = !state;
+                    TTLEventPtr eventPtr = TTLEvent::createTTLEvent(ttlChannel, startSampleForBlock + i, outputLine, state);
+                    addEvent(eventPtr, i);
+                    counter = 0;
+                }
+            }
+        }
+    }
 }
 
-void VisualizerPlugin::process (AudioBuffer<float>& buffer)
-{
-    checkForEvents (true);
-}
-
-void VisualizerPlugin::handleTTLEvent (TTLEventPtr event)
-{
-}
-
-void VisualizerPlugin::handleSpike (SpikePtr spike)
-{
-}
-
-void VisualizerPlugin::handleBroadcastMessage (const String& message, const int64 systemTimeMillis)
-{
-}
-
-void VisualizerPlugin::saveCustomParametersToXml (XmlElement* parentElement)
-{
-}
-
-void VisualizerPlugin::loadCustomParametersFromXml (XmlElement* parentElement)
-{
-}
+AudioProcessorEditor* TTLEventGenerator::createEditor() { return new TTLEventGeneratorEditor(this); }
